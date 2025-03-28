@@ -1,18 +1,18 @@
 // Copyright 2021 Signal Messenger, LLC
 // SPDX-License-Identifier: AGPL-3.0-only
-
+ 
 import React, { useCallback } from 'react';
 import type { RefObject } from 'react';
 import classNames from 'classnames';
 import { noop } from 'lodash';
 import { animated, useSpring } from '@react-spring/web';
-
+ 
 import type { LocalizerType } from '../../types/Util';
 import type { AttachmentType } from '../../types/Attachment';
 import type { PushPanelForConversationActionType } from '../../state/ducks/conversations';
 import { isDownloaded } from '../../types/Attachment';
 import type { DirectionType, MessageStatusType } from './Message';
-
+ 
 import type { ComputePeaksResult } from '../VoiceNotesPlaybackContext';
 import { MessageMetadata } from './MessageMetadata';
 import * as log from '../../logging/log';
@@ -25,7 +25,8 @@ import { durationToPlaybackText } from '../../util/durationToPlaybackText';
 import { shouldNeverBeCalled } from '../../util/shouldNeverBeCalled';
 import { formatFileSize } from '../../util/formatFileSize';
 import { roundFractionForProgressBar } from '../../util/numbers';
-
+import { globalMessageAudio } from '../../services/globalMessageAudio';
+ 
 export type OwnProps = Readonly<{
   active:
     | Pick<
@@ -39,8 +40,7 @@ export type OwnProps = Readonly<{
   collapseMetadata: boolean;
   withContentAbove: boolean;
   withContentBelow: boolean;
-
-  // Message properties. Many are needed for rendering metadata
+ 
   direction: DirectionType;
   expirationLength?: number;
   expirationTimestamp?: number;
@@ -55,40 +55,38 @@ export type OwnProps = Readonly<{
   computePeaks(url: string, barCount: number): Promise<ComputePeaksResult>;
   onPlayMessage: (id: string, position: number) => void;
 }>;
-
+ 
 export type DispatchProps = Readonly<{
   pushPanelForConversation: PushPanelForConversationActionType;
   setPosition: (positionAsRatio: number) => void;
   setPlaybackRate: (rate: number) => void;
   setIsPlaying: (value: boolean) => void;
 }>;
-
+ 
 export type Props = OwnProps & DispatchProps;
-
+ 
 enum State {
   NotDownloaded = 'NotDownloaded',
   Pending = 'Pending',
   Computing = 'Computing',
   Normal = 'Normal',
 }
-
-// Constants
-
+ 
 const CSS_BASE = 'module-message__audio-attachment';
 const BAR_COUNT = 47;
 const BAR_NOT_DOWNLOADED_HEIGHT = 2;
 const BAR_MIN_HEIGHT = 4;
 const BAR_MAX_HEIGHT = 20;
-
+ 
 const SPRING_CONFIG = {
   mass: 0.5,
   tension: 350,
   friction: 20,
   velocity: 0.01,
 };
-
+ 
 const DOT_DIV_WIDTH = 14;
-
+ 
 function PlayedDot({
   played,
   onHide,
@@ -98,8 +96,7 @@ function PlayedDot({
 }) {
   const start = played ? 1 : 0;
   const end = played ? 0 : 1;
-
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- FIXME
+ 
   const [animProps] = useSpring(
     {
       config: SPRING_CONFIG,
@@ -113,7 +110,7 @@ function PlayedDot({
     },
     [played]
   );
-
+ 
   return (
     <animated.div
       style={animProps}
@@ -125,19 +122,7 @@ function PlayedDot({
     />
   );
 }
-
-/**
- * Display message audio attachment along with its waveform, duration, and
- * toggle Play/Pause button.
- *
- * A global audio player is used for playback and access is managed by the
- * `active.content.current.id` and the `active.content.context` properties. Whenever both
- * are equal to `id` and `context` respectively the instance of the `MessageAudio`
- * assumes the ownership of the `Audio` instance and fully manages it.
- *
- * `context` is required for displaying separate MessageAudio instances in
- * MessageDetails and Message React components.
- */
+ 
 export function MessageAudio(props: Props): JSX.Element {
   const {
     active,
@@ -147,7 +132,6 @@ export function MessageAudio(props: Props): JSX.Element {
     collapseMetadata,
     withContentAbove,
     withContentBelow,
-
     direction,
     expirationLength,
     expirationTimestamp,
@@ -156,7 +140,6 @@ export function MessageAudio(props: Props): JSX.Element {
     status,
     textPending,
     timestamp,
-
     cancelAttachmentDownload,
     kickOffAttachmentDownload,
     onCorrupted,
@@ -166,22 +149,19 @@ export function MessageAudio(props: Props): JSX.Element {
     setPosition,
     setIsPlaying,
   } = props;
-
+ 
   const isPlaying = active?.playing ?? false;
-
   const [isPlayedDotVisible, setIsPlayedDotVisible] = React.useState(!played);
-
   const audioUrl = isDownloaded(attachment) ? attachment.url : undefined;
-
+ 
   const { duration, hasPeaks, peaks } = useComputePeaks({
     audioUrl,
     activeDuration: active?.duration,
     barCount: BAR_COUNT,
     onCorrupted,
   });
-
+ 
   let state: State;
-
   if (attachment.pending) {
     state = State.Pending;
   } else if (!isDownloaded(attachment)) {
@@ -191,7 +171,7 @@ export function MessageAudio(props: Props): JSX.Element {
   } else {
     state = State.Normal;
   }
-
+ 
   const toggleIsPlaying = useCallback(() => {
     if (!isPlaying) {
       if (!attachment.url) {
@@ -200,7 +180,7 @@ export function MessageAudio(props: Props): JSX.Element {
             `state: ${state}`
         );
       }
-
+ 
       if (active) {
         setIsPlaying(true);
       } else {
@@ -218,51 +198,64 @@ export function MessageAudio(props: Props): JSX.Element {
     id,
     onPlayMessage,
   ]);
-
+ 
   const currentTimeOrZero = active?.currentTime ?? 0;
-
+ 
   const updatePosition = useCallback(
     (newPosition: number) => {
       if (active) {
         setPosition(newPosition);
+  
+        const time = newPosition * duration;
+  
+        try {
+          globalMessageAudio.currentTime = time;
+          console.log('[MessageAudio] globalMessageAudio.currentTime set to', time);
+        } catch (err) {
+          console.warn('[MessageAudio] Failed to set currentTime via globalMessageAudio:', err);
+        }
+  
         if (!active.playing) {
           setIsPlaying(true);
         }
+  
         return;
       }
-
+  
       if (attachment.url) {
         onPlayMessage(id, newPosition);
       } else {
         log.warn('Waveform clicked on attachment with no url');
       }
     },
-    [active, attachment.url, id, onPlayMessage, setIsPlaying, setPosition]
+    [active, attachment.url, duration, id, onPlayMessage, setIsPlaying, setPosition]
   );
-
+  
+ 
   const handleWaveformClick = useCallback(
     (positionAsRatio: number) => {
       if (state !== State.Normal) {
         return;
       }
-
+ 
       updatePosition(positionAsRatio);
     },
     [state, updatePosition]
   );
-
+ 
   const handleWaveformScrub = useCallback(
     (amountInSeconds: number) => {
+      console.log('[MessageAudio] handleWaveformScrub() called');
       const currentPosition = currentTimeOrZero / duration;
       const positionIncrement = amountInSeconds / duration;
-
+ 
       updatePosition(
         Math.min(Math.max(0, currentPosition + positionIncrement), duration)
       );
     },
     [currentTimeOrZero, duration, updatePosition]
   );
-
+ 
   const waveform = (
     <WaveformScrubber
       i18n={i18n}
@@ -277,10 +270,9 @@ export function MessageAudio(props: Props): JSX.Element {
       onScrub={handleWaveformScrub}
     />
   );
-
+ 
   let button: React.ReactElement;
   if (state === State.Computing) {
-    // Not really a button, but who cares?
     button = (
       <PlaybackButton
         variant="message"
@@ -291,7 +283,6 @@ export function MessageAudio(props: Props): JSX.Element {
       />
     );
   } else if (state === State.Pending) {
-    // Not really a button, but who cares?
     const downloadFraction =
       attachment.size && attachment.totalDownloaded
         ? roundFractionForProgressBar(
@@ -320,7 +311,6 @@ export function MessageAudio(props: Props): JSX.Element {
       />
     );
   } else {
-    // State.Normal
     button = (
       <PlaybackButton
         ref={buttonRef}
@@ -336,13 +326,13 @@ export function MessageAudio(props: Props): JSX.Element {
       />
     );
   }
-
+ 
   const countDown = Math.max(0, duration - (active?.currentTime ?? 0));
   const fileSizeOrDuration =
     state === State.NotDownloaded || state === State.Pending || duration < 1
       ? formatFileSize(attachment.size)
       : durationToPlaybackText(countDown);
-
+ 
   const metadata = (
     <div className={`${CSS_BASE}__metadata`}>
       <div
@@ -354,13 +344,13 @@ export function MessageAudio(props: Props): JSX.Element {
       >
         {fileSizeOrDuration}
       </div>
-
+ 
       <div className={`${CSS_BASE}__controls`}>
         <PlayedDot
           played={played}
           onHide={() => setIsPlayedDotVisible(false)}
         />
-
+ 
         <PlaybackRateButton
           i18n={i18n}
           variant={`message-${direction}`}
@@ -375,7 +365,7 @@ export function MessageAudio(props: Props): JSX.Element {
           }}
         />
       </div>
-
+ 
       {!withContentBelow && !collapseMetadata && (
         <MessageMetadata
           direction={direction}
@@ -395,7 +385,7 @@ export function MessageAudio(props: Props): JSX.Element {
       )}
     </div>
   );
-
+ 
   return (
     <div
       className={classNames(
@@ -413,3 +403,4 @@ export function MessageAudio(props: Props): JSX.Element {
     </div>
   );
 }
+ 
